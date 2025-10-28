@@ -82,5 +82,6 @@ void loop() {
   
   delay(5000);
   pAdvertising->stop();
-  delay(100); 
+  delay(100);
+  delay(100);
 }
