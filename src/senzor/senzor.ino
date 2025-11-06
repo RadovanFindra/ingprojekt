@@ -7,7 +7,8 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 #include <BLEAdvertising.h>
-#include <WiFi.h> 
+#include <WiFi.h>
+#include <aes/esp_aes.h>
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
 
@@ -20,19 +21,23 @@ struct SensorData {
   uint16_t humidity;    // Vlhkosť * 100
 };
 
+// AES 128-bit kľúč
+const uint8_t AES_KEY[16] = { 0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,
+                              0x90,0xA0,0xB0,0xC0,0xD0,0xE0,0xF0,0x00 };
+
 uint32_t mySensorId = 0;
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Startujem Senzorovy Uzol s ID...");
 
-  
+
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect();   
+  WiFi.disconnect();
 
 
   uint8_t mac_addr[6];
-  
+
 
   WiFi.macAddress(mac_addr);
 
@@ -50,36 +55,47 @@ void setup() {
   BLEDevice::init("Senzor_ID_01");
   pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->setScanResponse(false);
-  pAdvertising->setMinPreferred(0x06); 
-  
+  pAdvertising->setMinPreferred(0x06);
+
   Serial.println("Zacinam vysielat (Advertising)...");
 }
 
 void loop() {
-  float temp_f = 25.0 + (rand() % 100) / 100.0;
-  float humid_f = 45.0 + (rand() % 100) / 100.0;
+  float temp_f = 25.0 + (rand() % 100)/100.0;
+  float humid_f = 45.0 + (rand() % 100)/100.0;
 
   SensorData dataToSend;
-  dataToSend.sensorId = mySensorId; 
+  dataToSend.sensorId = mySensorId;
   dataToSend.temperature = (uint16_t)(temp_f * 100);
   dataToSend.humidity = (uint16_t)(humid_f * 100);
 
+  // ŠIFROVANIE
+  uint8_t encrypted[16];
+  esp_aes_context ctx;
+  esp_aes_init(&ctx);
+  esp_aes_setkey(&ctx, AES_KEY, 128);
+  esp_aes_encrypt(&ctx, (uint8_t*)&dataToSend, encrypted);
+  esp_aes_free(&ctx);
 
-  // PRÍPRAVA DÁTOVÉHO BALÍČKA
-  std::string strManufacturerData = "";
-  strManufacturerData += (char)(CUSTOM_MANUFACTURER_ID & 0xFF);
-  strManufacturerData += (char)((CUSTOM_MANUFACTURER_ID >> 8) & 0xFF);
-  strManufacturerData.append((char*)&dataToSend, sizeof(dataToSend));
+  // HEX dump pre overenie
+  Serial.print("Šifrovaný payload: ");
+  for (int i=0; i<16; i++) Serial.printf("%02X ", encrypted[i]);
+  Serial.println();
 
-  // NASTAVENIE A SPUSTENIE VYSIELANIA
-  BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
-  oAdvertisementData.setFlags(0x04); 
-  oAdvertisementData.setManufacturerData(String(strManufacturerData.c_str())); 
-  pAdvertising->setAdvertisementData(oAdvertisementData);
-  pAdvertising->start(); 
+  // Rekonštrukcia BLE reklamného paketu
+  String payload = "";
+  payload += (char)(CUSTOM_MANUFACTURER_ID & 0xFF);
+  payload += (char)((CUSTOM_MANUFACTURER_ID >> 8) & 0xFF);
+  payload += String((char*)encrypted, 16);
 
-  Serial.printf("ID: 0x%08X, Temp=%.2f, Hum=%.2f\n", dataToSend.sensorId, temp_f, humid_f);
-  
+  BLEAdvertisementData adv;
+  adv.setFlags(0x04);
+  adv.setManufacturerData(payload);
+  pAdvertising->setAdvertisementData(adv);
+  pAdvertising->start();
+
+  Serial.printf("Odosielam šifrované dáta ID=0x%08X | T=%.2f | H=%.2f\n", mySensorId, temp_f, humid_f);
+
   delay(5000);
   pAdvertising->stop();
   delay(100);
