@@ -2,7 +2,7 @@
  * KÓD PRE: Senzor (BLE Advertiser)
  * Doska: ESP32-C6 (zatial)
  */
-
+#include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -90,7 +90,7 @@ void loop() {
 
   BLEAdvertisementData adv;
   adv.setFlags(0x04);
-  adv.setManufacturerData(payload);
+  adv.setManufacturerData(payload.c_str());
   pAdvertising->setAdvertisementData(adv);
   pAdvertising->start();
 

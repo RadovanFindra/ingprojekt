@@ -2,7 +2,7 @@
  * KÓD PRE: Gateway (BLE Scanner)
  * Doska: ESP32-C6 (zatial)
  */
-
+#include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
