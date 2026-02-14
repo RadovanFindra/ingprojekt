@@ -1,0 +1,35 @@
+# --- PlatformIO (TOTO JE NAJDÔLEŽITEJŠIE) ---
+# Ignoruj priečinky, kde sa ukladajú skompilované súbory a stiahnuté knižnice
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# --- macOS systémové súbory (neporiadok) ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Trashes
+
+# --- Visual Studio Code ---
+# Nastavenia workspace, ktoré sú špecifické pre tvoj počítač
+.vscode/
+*.code-workspace
+
+# --- Dočasné súbory Microsoft Office (Word/Excel) ---
+# Aby sa ti nenahrávali tie skryté súbory, keď máš otvorený Excel
+~$*.doc*
+~$*.xls*
+~$*.ppt*
+
+# --- C++ / Arduino build files (pre istotu) ---
+*.hex
+*.bin
+*.elf
+*.o
+*.a
+*.d
+
+# --- Ostatné ---
+# Ak sa vytvorí log súbor
+*.log
