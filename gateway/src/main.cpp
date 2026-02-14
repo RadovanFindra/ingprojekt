@@ -15,6 +15,15 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
+// BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
+#define DEBUG_PRINT_KEYS 1
+
+
+// Konštanty pre validáciu senzorov
+#define MIN_TEMPERATURE -40.0
+#define MAX_TEMPERATURE 85.0
+#define MIN_HUMIDITY 0.0
+#define MAX_HUMIDITY 100.0
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
 
@@ -49,7 +58,7 @@ AsyncWebServer server(80);
 
 // WiFi údaje
 const char* ssid = "Gateway_Config";
-const char* password = "12345678";
+const char* password = "GatewaySecure2024!";  // Zmeňte toto heslo po prvom nasadení!
 
 // Funkcia na generovanie AES kľúča z Chip ID pomocou SHA-256
 void generateKeyFromChipId(uint64_t chipId, uint8_t* key) {
@@ -137,11 +146,15 @@ void registerSensor(uint64_t chipId, const String& name) {
   saveSensorsToFile();
   
   Serial.printf("Registrovany novy senzor: ChipID=0x%016llX, Name=%s\n", chipId, name.c_str());
+  
+  #if DEBUG_PRINT_KEYS
   Serial.print("AES kluc: ");
   for (int i = 0; i < 16; i++) {
     Serial.printf("%02X ", sensor.aesKey[i]);
   }
   Serial.println();
+  Serial.println("UPOZORNENIE: Pre produkciu nastavte DEBUG_PRINT_KEYS na 0!");
+  #endif
 }
 
 // Funkcia na odregistráciu senzora
@@ -214,8 +227,8 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       float t = rcv.temperature/100.0;
       float h = rcv.humidity/100.0;
       
-      // Očakávame teplotu medzi -40 a 85°C a vlhkosť 0-100%
-      if (t >= -40.0 && t <= 85.0 && h >= 0.0 && h <= 100.0) {
+      // Očakávame teplotu a vlhkosť v definovaných rozsahoch
+      if (t >= MIN_TEMPERATURE && t <= MAX_TEMPERATURE && h >= MIN_HUMIDITY && h <= MAX_HUMIDITY) {
         Serial.printf("Uspesne desifrovane pomocou ChipID=0x%016llX (Name: %s)\n", 
                       pair.first, pair.second.name.c_str());
         updateSensorData(rcv.sensorId, t, h);
@@ -446,10 +459,17 @@ void setup() {
       const char* chipIdStr = doc["chipId"];
       const char* name = doc["name"];
       
-      uint64_t chipId = strtoull(chipIdStr, NULL, 16);
+      if (!chipIdStr || strlen(chipIdStr) == 0) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Chip ID je povinné\"}");
+        return;
+      }
       
-      if (chipId == 0) {
-        request->send(200, "application/json", "{\"success\":false,\"message\":\"Neplatné Chip ID\"}");
+      char* endPtr;
+      uint64_t chipId = strtoull(chipIdStr, &endPtr, 16);
+      
+      // Kontrola, či sa konverzia podarila (endPtr by mal ukazovať na koniec reťazca)
+      if (*endPtr != '\0' || chipId == 0) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Neplatné Chip ID - musí byť hex číslo\"}");
         return;
       }
       
@@ -464,7 +484,19 @@ void setup() {
       deserializeJson(doc, (const char*)data);
       
       const char* chipIdStr = doc["chipId"];
-      uint64_t chipId = strtoull(chipIdStr, NULL, 16);
+      
+      if (!chipIdStr || strlen(chipIdStr) == 0) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Chip ID je povinné\"}");
+        return;
+      }
+      
+      char* endPtr;
+      uint64_t chipId = strtoull(chipIdStr, &endPtr, 16);
+      
+      if (*endPtr != '\0' || chipId == 0) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Neplatné Chip ID\"}");
+        return;
+      }
       
       unregisterSensor(chipId);
       request->send(200, "application/json", "{\"success\":true}");

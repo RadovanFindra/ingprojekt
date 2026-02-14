@@ -49,11 +49,13 @@ platformio device monitor
 
 ### 2. Registrácia senzora
 
-1. Pripojte sa k WiFi sieti `Gateway_Config` (heslo: `12345678`)
+1. Pripojte sa k WiFi sieti `Gateway_Config` (heslo: `GatewaySecure2024!`)
 2. Otvorte prehliadač a prejdite na `http://192.168.4.1`
 3. V poli "Chip ID" zadajte Chip ID vášho senzora (napr. `123456789ABCDEF0` alebo `0x123456789ABCDEF0`)
 4. Zadajte názov senzora (napr. "Obývačka")
 5. Kliknite na "Registrovať senzor"
+
+**BEZPEČNOSŤ:** Pre produkčné nasadenie zmeňte WiFi heslo v súbore `gateway/src/main.cpp` (riadok 56).
 
 ### 3. Sledovanie dát
 
@@ -132,6 +134,16 @@ struct SensorData {
 3. **Rotácia kľúčov**: Implementovať periodickú rotáciu šifrovacích kľúčov
 4. **TLS**: Zabezpečiť webové rozhranie pomocou HTTPS
 5. **Autentifikácia používateľov**: Pridať prihlasovanie do web GUI
+6. **Konfigurovateľné heslo**: Umožniť nastavenie WiFi hesla cez webové rozhranie
+
+## Bezpečnostné poznámky
+
+### Pre produkčné nasadenie:
+
+1. **Zmeňte WiFi heslo** v `gateway/src/main.cpp` (riadok 56)
+2. **Vypnite debug výpis kľúčov** nastavením `DEBUG_PRINT_KEYS 0` v oboch súboroch
+3. **Zabezpečte sériový port** - nepovoľte neoprávnený prístup
+4. **Pravidelne aktualizujte** firmware pre opravu bezpečnostných chýb
 
 ## Licencia
 

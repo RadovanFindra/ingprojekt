@@ -11,6 +11,9 @@
 #include <aes/esp_aes.h>
 #include <mbedtls/sha256.h>
 
+// BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
+#define DEBUG_PRINT_KEYS 1
+
 #define CUSTOM_MANUFACTURER_ID 0x1234
 
 BLEAdvertising *pAdvertising;
@@ -69,11 +72,15 @@ void setup() {
 
   // Generovanie AES kľúča z Chip ID
   generateKeyFromChipId(myChipId, AES_KEY);
+  
+  #if DEBUG_PRINT_KEYS
   Serial.print("Vygenerovany AES kluc z Chip ID: ");
   for (int i = 0; i < 16; i++) {
     Serial.printf("%02X ", AES_KEY[i]);
   }
   Serial.println();
+  Serial.println("UPOZORNENIE: Pre produkciu nastavte DEBUG_PRINT_KEYS na 0!");
+  #endif
 
   BLEDevice::init("Senzor_ID_01");
   pAdvertising = BLEDevice::getAdvertising();
