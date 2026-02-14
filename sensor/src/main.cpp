@@ -9,6 +9,7 @@
 #include <BLEAdvertising.h>
 #include <WiFi.h>
 #include <aes/esp_aes.h>
+#include <mbedtls/sha256.h>
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
 
@@ -21,24 +22,37 @@ struct SensorData {
   uint16_t humidity;    // Vlhkosť * 100
 };
 
-// AES 128-bit kľúč
-const uint8_t AES_KEY[16] = { 0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,
-                              0x90,0xA0,0xB0,0xC0,0xD0,0xE0,0xF0,0x00 };
+// AES 128-bit kľúč - bude vygenerovaný z Chip ID
+uint8_t AES_KEY[16];
 
 uint32_t mySensorId = 0;
+uint64_t myChipId = 0;
+
+// Funkcia na generovanie AES kľúča z Chip ID pomocou SHA-256
+void generateKeyFromChipId(uint64_t chipId, uint8_t* key) {
+  uint8_t hash[32];
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256 (nie SHA-224)
+  mbedtls_sha256_update(&ctx, (uint8_t*)&chipId, sizeof(chipId));
+  mbedtls_sha256_finish(&ctx, hash);
+  mbedtls_sha256_free(&ctx);
+  
+  // Použijeme prvých 16 bajtov z hash ako AES-128 kľúč
+  memcpy(key, hash, 16);
+}
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Startujem Senzorovy Uzol s ID...");
 
-
+  // Získanie jedinečného Chip ID z ESP32
+  myChipId = ESP.getEfuseMac();
+  
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-
   uint8_t mac_addr[6];
-
-
   WiFi.macAddress(mac_addr);
 
   // Použijeme posledné 4 bajty MAC pre ID
@@ -46,11 +60,20 @@ void setup() {
 
   Serial.printf("Unikatne ID Senzora: 0x%08X (Plna MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
                 mySensorId, mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  Serial.printf("Chip ID: 0x%016llX\n", myChipId);
 
   // Kontrola, či ID nie je 0
   if (mySensorId == 0) {
     Serial.println("CHYBA: neviem precitat MAC adresu!");
   }
+
+  // Generovanie AES kľúča z Chip ID
+  generateKeyFromChipId(myChipId, AES_KEY);
+  Serial.print("Vygenerovany AES kluc z Chip ID: ");
+  for (int i = 0; i < 16; i++) {
+    Serial.printf("%02X ", AES_KEY[i]);
+  }
+  Serial.println();
 
   BLEDevice::init("Senzor_ID_01");
   pAdvertising = BLEDevice::getAdvertising();
