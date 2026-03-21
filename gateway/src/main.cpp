@@ -45,6 +45,7 @@ struct RegisteredSensor {
   uint64_t chipId;
   uint8_t aesKey[16];
   String name;
+  String sensorId;
 };
 
 // Databáza všetkých známych senzorov (kľúč = ID senzora)
@@ -59,6 +60,43 @@ AsyncWebServer server(80);
 // WiFi údaje
 const char* ssid = "Gateway_Config";
 const char* password = "GatewaySecure2024!";  // Zmeňte toto heslo po prvom nasadení!
+
+String formatSensorIdHex(uint32_t sensorId) {
+  char sensorIdStr[9];
+  sprintf(sensorIdStr, "%08X", sensorId);
+  return String(sensorIdStr);
+}
+
+bool parseSensorIdHex(const char* input, String& normalizedSensorId) {
+  if (!input) return false;
+
+  String raw = String(input);
+  raw.trim();
+  if (raw.length() == 0) return false;
+
+  if (raw.startsWith("0x") || raw.startsWith("0X")) {
+    raw = raw.substring(2);
+  }
+
+  if (raw.length() == 0 || raw.length() > 8) return false;
+
+  char* endPtr;
+  uint32_t sensorId = (uint32_t)strtoul(raw.c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return false;
+
+  normalizedSensorId = formatSensorIdHex(sensorId);
+  return true;
+}
+
+String getSensorNameBySensorId(uint32_t sensorId) {
+  String targetSensorId = formatSensorIdHex(sensorId);
+  for (const auto &entry : registeredSensors) {
+    if (entry.second.sensorId.length() > 0 && entry.second.sensorId.equalsIgnoreCase(targetSensorId)) {
+      return entry.second.name;
+    }
+  }
+  return "Neznamy";
+}
 
 // Funkcia na generovanie AES kľúča z Chip ID pomocou SHA-256
 void generateKeyFromChipId(uint64_t chipId, uint8_t* key) {
@@ -91,6 +129,7 @@ void saveSensorsToFile() {
     sprintf(chipIdStr, "%016llX", pair.first);
     sensor["chipId"] = chipIdStr;
     sensor["name"] = pair.second.name;
+    sensor["sensorId"] = pair.second.sensorId;
   }
   
   serializeJson(doc, file);
@@ -128,24 +167,28 @@ void loadSensorsFromFile() {
     RegisteredSensor regSensor;
     regSensor.chipId = chipId;
     regSensor.name = sensor["name"].as<String>();
+    regSensor.sensorId = sensor["sensorId"] | "";
     generateKeyFromChipId(chipId, regSensor.aesKey);
     
     registeredSensors[chipId] = regSensor;
-    Serial.printf("Nacitany senzor: ChipID=0x%016llX, Name=%s\n", chipId, regSensor.name.c_str());
+    Serial.printf("Nacitany senzor: ChipID=0x%016llX, Name=%s, SensorID=%s\n",
+                  chipId, regSensor.name.c_str(), regSensor.sensorId.c_str());
   }
 }
 
-// Funkcia na registráciu senzora
+// Funkcia na registráciu senzora (sensorId sa nastaví pri prvom príjmutí dát)
 void registerSensor(uint64_t chipId, const String& name) {
   RegisteredSensor sensor;
   sensor.chipId = chipId;
   sensor.name = name;
+  sensor.sensorId = "";
   generateKeyFromChipId(chipId, sensor.aesKey);
   
   registeredSensors[chipId] = sensor;
   saveSensorsToFile();
   
-  Serial.printf("Registrovany novy senzor: ChipID=0x%016llX, Name=%s\n", chipId, name.c_str());
+  Serial.printf("Registrovany novy senzor: ChipID=0x%016llX, Name=%s (SensorID sa nadstaví pri prvom príjmutí dát)\n",
+                chipId, name.c_str());
   
   #if DEBUG_PRINT_KEYS
   Serial.print("AES kluc: ");
@@ -165,7 +208,6 @@ void unregisterSensor(uint64_t chipId) {
   }
 }
 
-
 // Funkcia, ktorá uloží (alebo aktualizuje) údaje o senzore
 void updateSensorData(uint32_t id, float temp, float hum) {
   if (sensorDatabase.count(id) == 0)
@@ -177,7 +219,6 @@ void updateSensorData(uint32_t id, float temp, float hum) {
   r.lastSeen = millis();
   sensorDatabase[id] = r;
 }
-
 
 // Callback trieda – volá sa vždy, keď sa zachytí BLE reklama
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
@@ -229,8 +270,22 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       
       // Očakávame teplotu a vlhkosť v definovaných rozsahoch
       if (t >= MIN_TEMPERATURE && t <= MAX_TEMPERATURE && h >= MIN_HUMIDITY && h <= MAX_HUMIDITY) {
-        Serial.printf("Uspesne desifrovane pomocou ChipID=0x%016llX (Name: %s)\n", 
-                      pair.first, pair.second.name.c_str());
+        String incomingSensorId = formatSensorIdHex(rcv.sensorId);
+        
+        // Ak je sensorId prázdny, nastav ho z prvej prijatej správy
+        if (pair.second.sensorId.length() == 0) {
+          registeredSensors[pair.first].sensorId = incomingSensorId;
+          saveSensorsToFile();
+          Serial.printf("SensorID automaticky nastavený: ChipID=0x%016llX, SensorID=%s\n",
+                        pair.first, incomingSensorId.c_str());
+        }
+        // Ak sensorId už máme, skontroluj, či sa zhoduje
+        else if (!pair.second.sensorId.equalsIgnoreCase(incomingSensorId)) {
+          continue;
+        }
+
+        Serial.printf("Uspesne desifrovane: ChipID=0x%016llX (Name: %s), SensorID=%s\n",
+                      pair.first, pair.second.name.c_str(), incomingSensorId.c_str());
         updateSensorData(rcv.sensorId, t, h);
         decrypted = true;
         break;
@@ -242,7 +297,6 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     }
   }
 };
-
 
 void printDatabase() {
   Serial.println("\n-------------------------------------------");
@@ -257,7 +311,6 @@ void printDatabase() {
   }
   Serial.println("-------------------------------------------");
 }
-
 
 void setup() {
   Serial.begin(115200);
@@ -291,27 +344,147 @@ void setup() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Gateway - Registrácia senzorov</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
-    .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-    h1 { color: #333; }
-    .form-group { margin-bottom: 15px; }
-    label { display: block; margin-bottom: 5px; font-weight: bold; }
-    input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-    button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-    button:hover { background: #45a049; }
-    button.delete { background: #f44336; }
-    button.delete:hover { background: #da190b; }
-    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-    th { background-color: #4CAF50; color: white; }
-    tr:hover { background-color: #f5f5f5; }
-    .sensor-data { margin-top: 30px; }
-    .info { background: #e7f3fe; padding: 10px; border-left: 4px solid #2196F3; margin-bottom: 20px; }
+    :root {
+      --bg: #f2f5f8;
+      --card: #ffffff;
+      --text: #16212b;
+      --muted: #5b6b7a;
+      --accent: #0b8f6d;
+      --accent-dark: #0a775b;
+      --danger: #d64045;
+      --danger-dark: #b52f34;
+      --line: #dde4ea;
+      --chip: #e9f7f2;
+      --chip-text: #0b7559;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 15% 15%, #dceff0 0%, #f2f5f8 40%, #ecf2f6 100%);
+      padding: 20px;
+    }
+    .container {
+      max-width: 1040px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 12px 28px rgba(18, 35, 52, 0.08);
+      padding: 22px;
+    }
+    h1 {
+      margin: 0 0 10px 0;
+      font-size: 30px;
+      line-height: 1.2;
+    }
+    h2 { margin: 28px 0 12px; }
+    .subtle { color: var(--muted); margin-bottom: 16px; }
+    .info {
+      background: #edf8ff;
+      border: 1px solid #c8e5fb;
+      color: #1a5075;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin: 14px 0 20px;
+    }
+    .stat {
+      background: #f8fbfc;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .stat .label { color: var(--muted); font-size: 12px; }
+    .stat .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    .form-wrap {
+      background: #f9fbfd;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .form-group { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cfd8e3;
+      border-radius: 8px;
+      font-size: 14px;
+      background: #fff;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: 0.2s ease;
+    }
+    button:hover { background: var(--accent-dark); }
+    button.delete { background: var(--danger); }
+    button.delete:hover { background: var(--danger-dark); }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 740px; }
+    th, td {
+      padding: 11px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+      vertical-align: middle;
+    }
+    th {
+      background: #f0f6fa;
+      color: #274055;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    tr:hover { background: #fafdfd; }
+    .chip {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--chip);
+      color: var(--chip-text);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status-ok { color: #0a7b57; font-weight: 600; }
+    .status-stale { color: #b85a00; font-weight: 600; }
+    .sensor-data { margin-top: 32px; }
+    .footer-note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+    @media (max-width: 760px) {
+      body { padding: 12px; }
+      .container { padding: 14px; border-radius: 12px; }
+      h1 { font-size: 24px; }
+      .grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🌡️ Gateway - Registrácia senzorov</h1>
+    <h1>Gateway Dashboard</h1>
+    <div class="subtle">Registracia BLE senzorov a live prehlad prijatych merani.</div>
+    <div class="grid">
+      <div class="stat"><div class="label">Registrovane senzory</div><div class="value" id="registeredCount">0</div></div>
+      <div class="stat"><div class="label">Aktivne data streamy</div><div class="value" id="activeCount">0</div></div>
+      <div class="stat"><div class="label">Posledny refresh</div><div class="value" id="lastRefresh">-</div></div>
+    </div>
     
     <div class="info">
       <strong>Inštrukcie:</strong> Zadajte Chip ID senzora (64-bit hex hodnota, napr. 0x123456789ABCDEF0) a meno pre identifikáciu.
@@ -319,15 +492,17 @@ void setup() {
     </div>
     
     <h2>Registrovať nový senzor</h2>
-    <div class="form-group">
-      <label for="chipId">Chip ID (hex):</label>
-      <input type="text" id="chipId" placeholder="0x123456789ABCDEF0 alebo 123456789ABCDEF0">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label for="chipId">Chip ID (hex):</label>
+        <input type="text" id="chipId" placeholder="0x123456789ABCDEF0 alebo 123456789ABCDEF0">
+      </div>
+      <div class="form-group">
+        <label for="name">Názov senzora:</label>
+        <input type="text" id="name" placeholder="Napr. Obyvacka, Kupelna">
+      </div>
+      <button onclick="registerSensor()">Registrovat senzor</button>
     </div>
-    <div class="form-group">
-      <label for="name">Názov senzora:</label>
-      <input type="text" id="name" placeholder="Napr. Obývačka, Kúpeľňa">
-    </div>
-    <button onclick="registerSensor()">Registrovať senzor</button>
     
     <h2>Registrované senzory</h2>
     <div id="sensors"></div>
@@ -341,15 +516,18 @@ void setup() {
       fetch('/api/sensors')
         .then(response => response.json())
         .then(data => {
-          let html = '<table><tr><th>Chip ID</th><th>Názov</th><th>Akcia</th></tr>';
+          document.getElementById('registeredCount').textContent = data.length;
+          let html = '<div class="table-wrap"><table><tr><th>Chip ID</th><th>Nazov</th><th>Sensor ID</th><th>Akcia</th></tr>';
           data.forEach(sensor => {
+            const sensorId = sensor.sensorId ? `0x${sensor.sensorId}` : '<span class="chip">caka na prve data</span>';
             html += `<tr>
               <td>${sensor.chipId}</td>
               <td>${sensor.name}</td>
-              <td><button class="delete" onclick="deleteSensor('${sensor.chipId}')">Odstrániť</button></td>
+              <td>${sensorId}</td>
+              <td><button class="delete" onclick="deleteSensor('${sensor.chipId}')">Odstranit</button></td>
             </tr>`;
           });
-          html += '</table>';
+          html += '</table></div>';
           document.getElementById('sensors').innerHTML = html;
         });
     }
@@ -358,17 +536,26 @@ void setup() {
       fetch('/api/data')
         .then(response => response.json())
         .then(data => {
-          let html = '<table><tr><th>Sensor ID</th><th>Teplota (°C)</th><th>Vlhkosť (%)</th><th>Posledná aktualizácia (s)</th></tr>';
+          data.sort((a, b) => Number(a.lastSeen) - Number(b.lastSeen));
+          let activeCount = 0;
+          let html = '<div class="table-wrap"><table><tr><th>Nazov</th><th>Sensor ID</th><th>Teplota (C)</th><th>Vlhkost (%)</th><th>Aktualizovane pred (s)</th><th>Stav</th></tr>';
           data.forEach(sensor => {
+            const age = Number(sensor.lastSeen);
+            const isActive = age <= 15;
+            if (isActive) activeCount += 1;
             html += `<tr>
+              <td>${sensor.name || 'Neznamy'}</td>
               <td>0x${sensor.id}</td>
               <td>${sensor.temperature}</td>
               <td>${sensor.humidity}</td>
               <td>${sensor.lastSeen}</td>
+              <td class="${isActive ? 'status-ok' : 'status-stale'}">${isActive ? 'Aktivny' : 'Stary zaznam'}</td>
             </tr>`;
           });
-          html += '</table>';
+          html += '</table></div>';
           document.getElementById('sensorData').innerHTML = html;
+          document.getElementById('activeCount').textContent = activeCount;
+          document.getElementById('lastRefresh').textContent = new Date().toLocaleTimeString();
         });
     }
     
@@ -377,7 +564,7 @@ void setup() {
       let name = document.getElementById('name').value.trim();
       
       if (!chipId || !name) {
-        alert('Prosím vyplňte všetky polia');
+        alert('Prosím vyplňte všetky polia (Chip ID, Názov)');
         return;
       }
       
@@ -392,7 +579,7 @@ void setup() {
       .then(response => response.json())
       .then(data => {
         if (data.success) {
-          alert('Senzor úspešne registrovaný!');
+          alert('Senzor uspesne registrovany. Sensor ID sa nastavi po prijati prvej spravy.');
           document.getElementById('chipId').value = '';
           document.getElementById('name').value = '';
           loadSensors();
@@ -403,7 +590,7 @@ void setup() {
     }
     
     function deleteSensor(chipId) {
-      if (!confirm('Naozaj chcete odstrániť tento senzor?')) return;
+      if (!confirm('Naozaj chcete odstranit tento senzor?')) return;
       
       fetch('/api/unregister', {
         method: 'POST',
@@ -413,7 +600,7 @@ void setup() {
       .then(response => response.json())
       .then(data => {
         if (data.success) {
-          alert('Senzor odstránený!');
+          alert('Senzor odstraneny.');
           loadSensors();
         }
       });
@@ -443,6 +630,7 @@ void setup() {
       sprintf(chipIdStr, "%016llX", pair.first);
       sensor["chipId"] = chipIdStr;
       sensor["name"] = pair.second.name;
+      sensor["sensorId"] = pair.second.sensorId;
     }
     
     String response;
@@ -461,6 +649,11 @@ void setup() {
       
       if (!chipIdStr || strlen(chipIdStr) == 0) {
         request->send(200, "application/json", "{\"success\":false,\"message\":\"Chip ID je povinné\"}");
+        return;
+      }
+
+      if (!name || strlen(name) == 0) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Názov je povinný\"}");
         return;
       }
       
@@ -513,6 +706,7 @@ void setup() {
       char idStr[9];
       sprintf(idStr, "%08X", pair.first);
       sensor["id"] = idStr;
+      sensor["name"] = getSensorNameBySensorId(pair.first);
       sensor["temperature"] = String(pair.second.temperature, 2);
       sensor["humidity"] = String(pair.second.humidity, 2);
       sensor["lastSeen"] = String((now - pair.second.lastSeen) / 1000.0, 1);

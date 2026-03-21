@@ -47,6 +47,7 @@ void generateKeyFromChipId(uint64_t chipId, uint8_t* key) {
 
 void setup() {
   Serial.begin(115200);
+  // sleep(2000); // Krátka pauza pre stabilizáciu sériovej komunikace
   Serial.println("Startujem Senzorovy Uzol s ID...");
 
   // Získanie jedinečného Chip ID z ESP32
@@ -61,9 +62,7 @@ void setup() {
   // Použijeme posledné 4 bajty MAC pre ID
   mySensorId = (mac_addr[2] << 24) | (mac_addr[3] << 16) | (mac_addr[4] << 8) | mac_addr[5];
 
-  Serial.printf("Unikatne ID Senzora: 0x%08X (Plna MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
-                mySensorId, mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-  Serial.printf("Chip ID: 0x%016llX\n", myChipId);
+  
 
   // Kontrola, či ID nie je 0
   if (mySensorId == 0) {
@@ -88,6 +87,10 @@ void setup() {
   pAdvertising->setMinPreferred(0x06);
 
   Serial.println("Zacinam vysielat (Advertising)...");
+  
+  Serial.printf("Unikatne ID Senzora: 0x%08X (Plna MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
+                mySensorId, mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  Serial.printf("Chip ID: 0x%016llX\n", myChipId);
 }
 
 void loop() {
