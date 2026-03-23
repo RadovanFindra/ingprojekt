@@ -1,6 +1,6 @@
 /*
- * KÓD PRE: Senzor (BLE Advertiser)
- * Doska: ESP32-C6 (zatial)
+ * KÓD PRE: Srensor (BLE Advertiser)
+ * Doska: ESP32 C3 Super Mini Plus
  */
 #include <Arduino.h>
 #include <BLEDevice.h>
@@ -9,14 +9,24 @@
 #include <BLEAdvertising.h>
 #include <WiFi.h>
 #include <aes/esp_aes.h>
+#include <esp_sleep.h>
 #include <mbedtls/sha256.h>
+#include <Wire.h>
+#include "Adafruit_SHT4x.h"
 
 // BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
 #define DEBUG_PRINT_KEYS 1
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
 
+#define WAKE_INTERVAL_SECONDS 300ULL
+#define WAKE_INTERVAL_US (WAKE_INTERVAL_SECONDS * 1000000ULL)
+
+#define I2C_SDA 0
+#define I2C_SCL 1
+
 BLEAdvertising *pAdvertising;
+Adafruit_SHT4x sht4 = Adafruit_SHT4x();
 
 // Dátová štruktúra
 struct SensorData {
@@ -47,8 +57,26 @@ void generateKeyFromChipId(uint64_t chipId, uint8_t* key) {
 
 void setup() {
   Serial.begin(115200);
-  // sleep(2000); // Krátka pauza pre stabilizáciu sériovej komunikace
+  delay(2000);
+  for(int i = 5; i > 0; i--) {
+    Serial.printf("Cakam na upload... %d\n", i);
+    delay(1000);
+  }
   Serial.println("Startujem Senzorovy Uzol s ID...");
+  Serial.printf("Wake-up interval: %llu sekund\n", WAKE_INTERVAL_SECONDS);
+
+  
+
+  Serial.println("Configuring I2C...");
+  Wire.begin(I2C_SDA, I2C_SCL);
+  if (!sht4.begin(&Wire)) {
+    Serial.println("SHT41 not found!");
+    while (1) delay(10);
+  }
+
+  sht4.setHeater(SHT4X_NO_HEATER);
+  sht4.setPrecision(SHT4X_HIGH_PRECISION);
+  Serial.println("SHT41 Initialized and Heater Disabled.");
 
   // Získanie jedinečného Chip ID z ESP32
   myChipId = ESP.getEfuseMac();
@@ -61,8 +89,6 @@ void setup() {
 
   // Použijeme posledné 4 bajty MAC pre ID
   mySensorId = (mac_addr[2] << 24) | (mac_addr[3] << 16) | (mac_addr[4] << 8) | mac_addr[5];
-
-  
 
   // Kontrola, či ID nie je 0
   if (mySensorId == 0) {
@@ -91,16 +117,16 @@ void setup() {
   Serial.printf("Unikatne ID Senzora: 0x%08X (Plna MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
                 mySensorId, mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
   Serial.printf("Chip ID: 0x%016llX\n", myChipId);
-}
 
-void loop() {
-  float temp_f = 25.0 + (rand() % 100)/100.0;
-  float humid_f = 45.0 + (rand() % 100)/100.0;
+  // Zmeraj, odosli a uspim zariadenie. Po prebudeni sa setup() spusti znova.
+  sensors_event_t humidity, temp;
+  sht4.getEvent(&humidity, &temp);
 
   SensorData dataToSend;
   dataToSend.sensorId = mySensorId;
-  dataToSend.temperature = (uint16_t)(temp_f * 100);
-  dataToSend.humidity = (uint16_t)(humid_f * 100);
+  
+  dataToSend.temperature =  (uint16_t)(temp.temperature * 100);
+  dataToSend.humidity = (uint16_t)(humidity.relative_humidity * 100);
 
   // ŠIFROVANIE
   uint8_t encrypted[16];
@@ -127,10 +153,19 @@ void loop() {
   pAdvertising->setAdvertisementData(adv);
   pAdvertising->start();
 
-  Serial.printf("Odosielam šifrované dáta ID=0x%08X | T=%.2f | H=%.2f\n", mySensorId, temp_f, humid_f);
+  Serial.printf("Odosielam šifrované dáta ID=0x%08X | T=%.2f | H=%.2f\n", mySensorId, temp.temperature, humidity.relative_humidity);
 
-  delay(5000);
+  // Kratky cas na vysielanie reklamneho paketu pred uspanim.
+  delay(1000);
   pAdvertising->stop();
-  delay(100);
-  delay(100);
+
+  Serial.printf("Prechadzam do deep sleep na %llu sekund...\n", WAKE_INTERVAL_SECONDS);
+  esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_US);
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // Tento kod sa pri deep sleep cykle normalne nevykona.
+  delay(1000);
 }

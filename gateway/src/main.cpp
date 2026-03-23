@@ -541,7 +541,7 @@ void setup() {
           let html = '<div class="table-wrap"><table><tr><th>Nazov</th><th>Sensor ID</th><th>Teplota (C)</th><th>Vlhkost (%)</th><th>Aktualizovane pred (s)</th><th>Stav</th></tr>';
           data.forEach(sensor => {
             const age = Number(sensor.lastSeen);
-            const isActive = age <= 15;
+            const isActive = age <= 300;
             if (isActive) activeCount += 1;
             html += `<tr>
               <td>${sensor.name || 'Neznamy'}</td>
