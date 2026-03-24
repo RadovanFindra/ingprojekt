@@ -14,6 +14,8 @@
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
 
 // BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
 #define DEBUG_PRINT_KEYS 1
@@ -26,6 +28,9 @@
 #define MAX_HUMIDITY 100.0
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
+#define IR_LED_PIN 2
+#define SENSOR_ACTIVE_WINDOW_MS 120000UL
+#define AC_COMMAND_MIN_INTERVAL_MS 7000UL
 
 // Dátová štruktúra,
 struct SensorData {
@@ -56,16 +61,144 @@ std::map<uint64_t, RegisteredSensor> registeredSensors;
 
 // Web server na porte 80
 AsyncWebServer server(80);
+IRsend irsend(IR_LED_PIN);
 
 // WiFi údaje
 const char* ssid = "Gateway_Config";
 const char* password = "GatewaySecure2024!";  // Zmeňte toto heslo po prvom nasadení!
+
+struct ClimateControlState {
+  bool enabled;
+  float targetTemp;
+  float hysteresis;
+  uint32_t selectedSensorId;  // 0 = automaticky podla najcerstvejsieho senzora
+  bool acPowerOn;
+  unsigned long lastIrCommandAt;
+  uint64_t irCodeOn;
+  uint64_t irCodeOff;
+  uint64_t irCodeCool;
+  uint16_t irBits;
+};
+
+ClimateControlState climate = {
+  false,
+  24.0f,
+  0.5f,
+  0,
+  false,
+  0,
+  0x20DF10EF,
+  0x20DF906F,
+  0x20DF40BF,
+  32
+};
+
+String formatHex64(uint64_t value) {
+  char buf[19];
+  sprintf(buf, "0x%016llX", value);
+  return String(buf);
+}
+
+uint64_t parseHexToU64(const String& rawInput) {
+  String input = rawInput;
+  input.trim();
+  if (input.startsWith("0x") || input.startsWith("0X")) {
+    input = input.substring(2);
+  }
+  if (input.length() == 0) return 0;
+  char* endPtr;
+  uint64_t value = strtoull(input.c_str(), &endPtr, 16);
+  if (*endPtr != '\0') return 0;
+  return value;
+}
+
+bool sendAcIrCommand(uint64_t code, const char* label) {
+  unsigned long now = millis();
+  if (now - climate.lastIrCommandAt < AC_COMMAND_MIN_INTERVAL_MS) {
+    Serial.printf("AC IR skip (%s): prilis skoro od posledneho prikazu\n", label);
+    return false;
+  }
+  irsend.sendNEC(code, climate.irBits);
+  climate.lastIrCommandAt = now;
+  Serial.printf("AC IR odoslany (%s): code=0x%016llX, bits=%u\n", label, code, climate.irBits);
+  return true;
+}
 
 String formatSensorIdHex(uint32_t sensorId) {
   char sensorIdStr[9];
   sprintf(sensorIdStr, "%08X", sensorId);
   return String(sensorIdStr);
 }
+
+String getSensorNameBySensorId(uint32_t sensorId) {
+  String targetSensorId = formatSensorIdHex(sensorId);
+  for (const auto &entry : registeredSensors) {
+    if (entry.second.sensorId.length() > 0 && entry.second.sensorId.equalsIgnoreCase(targetSensorId)) {
+      return entry.second.name;
+    }
+  }
+  return "Neznamy";
+}
+
+bool getControlTemperature(float* outTemp, uint32_t* outSensorId, String* outName) {
+  unsigned long now = millis();
+  bool found = false;
+  unsigned long newestSeen = 0;
+  float selectedTemp = 0.0f;
+  uint32_t selectedId = 0;
+
+  for (const auto &pair : sensorDatabase) {
+    unsigned long age = now - pair.second.lastSeen;
+    if (age > SENSOR_ACTIVE_WINDOW_MS) continue;
+    if (climate.selectedSensorId != 0 && pair.first != climate.selectedSensorId) continue;
+
+    if (!found || pair.second.lastSeen > newestSeen) {
+      found = true;
+      newestSeen = pair.second.lastSeen;
+      selectedTemp = pair.second.temperature;
+      selectedId = pair.first;
+    }
+  }
+
+  if (!found) return false;
+  *outTemp = selectedTemp;
+  *outSensorId = selectedId;
+  *outName = getSensorNameBySensorId(selectedId);
+  return true;
+}
+
+void runAutoClimateControl() {
+  if (!climate.enabled) return;
+
+  float controlTemp;
+  uint32_t controlSensorId;
+  String controlSensorName;
+  if (!getControlTemperature(&controlTemp, &controlSensorId, &controlSensorName)) {
+    return;
+  }
+
+  float onThreshold = climate.targetTemp + climate.hysteresis;
+  float offThreshold = climate.targetTemp - climate.hysteresis;
+
+  if (!climate.acPowerOn && controlTemp >= onThreshold) {
+    uint64_t startCode = climate.irCodeCool != 0 ? climate.irCodeCool : climate.irCodeOn;
+    bool sent = sendAcIrCommand(startCode, "AUTO START");
+    if (sent) {
+      climate.acPowerOn = true;
+      Serial.printf("AUTO AC: Zapnutie, zdroj=%s (0x%08X), temp=%.2f\n",
+                    controlSensorName.c_str(), controlSensorId, controlTemp);
+    }
+  } else if (climate.acPowerOn && controlTemp <= offThreshold) {
+    bool sent = sendAcIrCommand(climate.irCodeOff, "OFF");
+    if (sent) {
+      climate.acPowerOn = false;
+      Serial.printf("AUTO AC: Vypnutie, zdroj=%s (0x%08X), temp=%.2f\n",
+                    controlSensorName.c_str(), controlSensorId, controlTemp);
+    }
+  }
+}
+
+
 
 bool parseSensorIdHex(const char* input, String& normalizedSensorId) {
   if (!input) return false;
@@ -86,16 +219,6 @@ bool parseSensorIdHex(const char* input, String& normalizedSensorId) {
 
   normalizedSensorId = formatSensorIdHex(sensorId);
   return true;
-}
-
-String getSensorNameBySensorId(uint32_t sensorId) {
-  String targetSensorId = formatSensorIdHex(sensorId);
-  for (const auto &entry : registeredSensors) {
-    if (entry.second.sensorId.length() > 0 && entry.second.sensorId.equalsIgnoreCase(targetSensorId)) {
-      return entry.second.name;
-    }
-  }
-  return "Neznamy";
 }
 
 // Funkcia na generovanie AES kľúča z Chip ID pomocou SHA-256
@@ -315,6 +438,7 @@ void printDatabase() {
 void setup() {
   Serial.begin(115200);
   Serial.println("Startujem Gateway...");
+  irsend.begin();
   
   // Inicializácia LittleFS pre úložisko
   if (!LittleFS.begin(true)) {
@@ -468,11 +592,50 @@ void setup() {
     .status-stale { color: #b85a00; font-weight: 600; }
     .sensor-data { margin-top: 32px; }
     .footer-note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+    .ac-card {
+      margin-top: 26px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: #f8fbfd;
+    }
+    .ac-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .ac-input { margin-bottom: 10px; }
+    .ac-input label { margin-bottom: 5px; }
+    .ac-input input, .ac-input select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cfd8e3;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .ac-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .btn-secondary { background: #2f6b9a; }
+    .btn-secondary:hover { background: #25577e; }
+    .ac-status-box {
+      margin-top: 10px;
+      border: 1px dashed #b9c9d7;
+      border-radius: 10px;
+      padding: 10px;
+      color: #37556c;
+      font-size: 13px;
+      background: #fff;
+    }
     @media (max-width: 760px) {
       body { padding: 12px; }
       .container { padding: 14px; border-radius: 12px; }
       h1 { font-size: 24px; }
       .grid { grid-template-columns: 1fr; }
+      .ac-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -509,6 +672,61 @@ void setup() {
     
     <h2 class="sensor-data">Prijaté dáta zo senzorov</h2>
     <div id="sensorData"></div>
+
+    <div class="ac-card">
+      <h2>Klimatizacia (IR)</h2>
+      <div class="subtle">Automaticke ovladanie podla teploty zo zvoleneho senzora.</div>
+      <div class="ac-grid">
+        <div>
+          <div class="ac-input">
+            <label for="acEnabled">Auto rezim</label>
+            <select id="acEnabled">
+              <option value="false">Vypnute</option>
+              <option value="true">Zapnute</option>
+            </select>
+          </div>
+          <div class="ac-input">
+            <label for="acSourceSensor">Zdrojovy senzor</label>
+            <select id="acSourceSensor">
+              <option value="00000000">Auto (najcerstvejsi)</option>
+            </select>
+          </div>
+          <div class="ac-input">
+            <label for="acTarget">Cielova teplota (C)</label>
+            <input type="text" id="acTarget" value="24.0">
+          </div>
+          <div class="ac-input">
+            <label for="acHyst">Hysteresis (C)</label>
+            <input type="text" id="acHyst" value="0.5">
+          </div>
+        </div>
+        <div>
+          <div class="ac-input">
+            <label for="irBits">IR bity</label>
+            <input type="text" id="irBits" value="32">
+          </div>
+          <div class="ac-input">
+            <label for="irCodeOn">IR kod ON (hex)</label>
+            <input type="text" id="irCodeOn" value="0x20DF10EF">
+          </div>
+          <div class="ac-input">
+            <label for="irCodeOff">IR kod OFF (hex)</label>
+            <input type="text" id="irCodeOff" value="0x20DF906F">
+          </div>
+          <div class="ac-input">
+            <label for="irCodeCool">IR kod COOL preset (hex)</label>
+            <input type="text" id="irCodeCool" value="0x20DF40BF">
+          </div>
+        </div>
+      </div>
+      <div class="ac-actions">
+        <button onclick="saveAcConfig()">Ulozit AC konfiguraciu</button>
+        <button class="btn-secondary" onclick="sendAcManual('cool')">Poslat COOL</button>
+        <button class="btn-secondary" onclick="sendAcManual('on')">Poslat ON</button>
+        <button class="delete" onclick="sendAcManual('off')">Poslat OFF</button>
+      </div>
+      <div class="ac-status-box" id="acStatus">AC status: nacitavam...</div>
+    </div>
   </div>
   
   <script>
@@ -517,6 +735,7 @@ void setup() {
         .then(response => response.json())
         .then(data => {
           document.getElementById('registeredCount').textContent = data.length;
+          renderAcSensorOptions(data);
           let html = '<div class="table-wrap"><table><tr><th>Chip ID</th><th>Nazov</th><th>Sensor ID</th><th>Akcia</th></tr>';
           data.forEach(sensor => {
             const sensorId = sensor.sensorId ? `0x${sensor.sensorId}` : '<span class="chip">caka na prve data</span>';
@@ -530,6 +749,22 @@ void setup() {
           html += '</table></div>';
           document.getElementById('sensors').innerHTML = html;
         });
+    }
+
+    function renderAcSensorOptions(sensors) {
+      const select = document.getElementById('acSourceSensor');
+      if (!select) return;
+
+      const current = select.value;
+      let html = '<option value="00000000">Auto (najcerstvejsi)</option>';
+      sensors.forEach(sensor => {
+        if (!sensor.sensorId) return;
+        html += `<option value="${sensor.sensorId}">${sensor.name} (0x${sensor.sensorId})</option>`;
+      });
+      select.innerHTML = html;
+      if ([...select.options].some(o => o.value === current)) {
+        select.value = current;
+      }
     }
     
     function loadSensorData() {
@@ -605,13 +840,89 @@ void setup() {
         }
       });
     }
+
+    function loadAcStatus() {
+      fetch('/api/ac/status')
+        .then(response => response.json())
+        .then(data => {
+          document.getElementById('acEnabled').value = data.enabled ? 'true' : 'false';
+          document.getElementById('acTarget').value = data.targetTemp;
+          document.getElementById('acHyst').value = data.hysteresis;
+          document.getElementById('irBits').value = data.irBits;
+          document.getElementById('irCodeOn').value = data.irCodeOn;
+          document.getElementById('irCodeOff').value = data.irCodeOff;
+          document.getElementById('irCodeCool').value = data.irCodeCool;
+          if (data.selectedSensorId) {
+            const id = data.selectedSensorId.toUpperCase();
+            const select = document.getElementById('acSourceSensor');
+            if ([...select.options].some(o => o.value === id)) {
+              select.value = id;
+            }
+          }
+
+          let controlInfo = 'n/a';
+          if (data.controlTemp) {
+            controlInfo = `${data.controlTemp} C (${data.controlSensorName || 'Neznamy'} / 0x${data.controlSensorId})`;
+          }
+          const power = data.acPowerOn ? 'ON' : 'OFF';
+          const mode = data.enabled ? 'AUTO' : 'MANUAL';
+          document.getElementById('acStatus').textContent =
+            `AC status: ${power}, rezim=${mode}, kontrolna teplota=${controlInfo}`;
+        });
+    }
+
+    function saveAcConfig() {
+      const payload = {
+        enabled: document.getElementById('acEnabled').value === 'true',
+        selectedSensorId: document.getElementById('acSourceSensor').value,
+        targetTemp: Number(document.getElementById('acTarget').value),
+        hysteresis: Number(document.getElementById('acHyst').value),
+        irBits: Number(document.getElementById('irBits').value),
+        irCodeOn: document.getElementById('irCodeOn').value.trim(),
+        irCodeOff: document.getElementById('irCodeOff').value.trim(),
+        irCodeCool: document.getElementById('irCodeCool').value.trim()
+      };
+
+      fetch('/api/ac/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          alert('AC konfiguracia ulozena.');
+          loadAcStatus();
+        } else {
+          alert('Chyba konfiguracie: ' + (data.message || 'neznamy problem'));
+        }
+      });
+    }
+
+    function sendAcManual(action) {
+      fetch('/api/ac/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          loadAcStatus();
+        } else {
+          alert('IR prikaz neodoslany: ' + (data.message || 'skus znova o par sekund'));
+        }
+      });
+    }
     
     // Načítať dáta pri načítaní stránky
     loadSensors();
     loadSensorData();
+    loadAcStatus();
     
     // Automaticky aktualizovať dáta každých 5 sekúnd
     setInterval(loadSensorData, 5000);
+    setInterval(loadAcStatus, 5000);
   </script>
 </body>
 </html>
@@ -716,6 +1027,112 @@ void setup() {
     serializeJson(doc, response);
     request->send(200, "application/json", response);
   });
+
+  server.on("/api/ac/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    JsonDocument doc;
+    doc["enabled"] = climate.enabled;
+    doc["targetTemp"] = climate.targetTemp;
+    doc["hysteresis"] = climate.hysteresis;
+
+    char selectedSensorIdStr[9];
+    sprintf(selectedSensorIdStr, "%08X", climate.selectedSensorId);
+    doc["selectedSensorId"] = selectedSensorIdStr;
+
+    doc["acPowerOn"] = climate.acPowerOn;
+    doc["irBits"] = climate.irBits;
+    doc["irCodeOn"] = formatHex64(climate.irCodeOn);
+    doc["irCodeOff"] = formatHex64(climate.irCodeOff);
+    doc["irCodeCool"] = formatHex64(climate.irCodeCool);
+
+    float controlTemp;
+    uint32_t controlSensorId;
+    String controlSensorName;
+    if (getControlTemperature(&controlTemp, &controlSensorId, &controlSensorName)) {
+      doc["controlTemp"] = String(controlTemp, 2);
+      char controlIdStr[9];
+      sprintf(controlIdStr, "%08X", controlSensorId);
+      doc["controlSensorId"] = controlIdStr;
+      doc["controlSensorName"] = controlSensorName;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+
+  server.on("/api/ac/config", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, (const char*)data);
+      if (err) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Neplatny JSON\"}");
+        return;
+      }
+
+      climate.enabled = doc["enabled"] | climate.enabled;
+      climate.targetTemp = doc["targetTemp"] | climate.targetTemp;
+      climate.hysteresis = doc["hysteresis"] | climate.hysteresis;
+      climate.irBits = doc["irBits"] | climate.irBits;
+
+      if (climate.hysteresis < 0.1f) climate.hysteresis = 0.1f;
+      if (climate.hysteresis > 5.0f) climate.hysteresis = 5.0f;
+      if (climate.targetTemp < 16.0f) climate.targetTemp = 16.0f;
+      if (climate.targetTemp > 30.0f) climate.targetTemp = 30.0f;
+      if (climate.irBits < 8 || climate.irBits > 64) climate.irBits = 32;
+
+      const char* selectedSensorIdStr = doc["selectedSensorId"];
+      if (selectedSensorIdStr) {
+        String normalized;
+        if (parseSensorIdHex(selectedSensorIdStr, normalized)) {
+          climate.selectedSensorId = strtoul(normalized.c_str(), NULL, 16);
+        } else {
+          climate.selectedSensorId = 0;
+        }
+      }
+
+      const char* onCode = doc["irCodeOn"];
+      const char* offCode = doc["irCodeOff"];
+      const char* coolCode = doc["irCodeCool"];
+      if (onCode) climate.irCodeOn = parseHexToU64(String(onCode));
+      if (offCode) climate.irCodeOff = parseHexToU64(String(offCode));
+      if (coolCode) climate.irCodeCool = parseHexToU64(String(coolCode));
+
+      request->send(200, "application/json", "{\"success\":true}");
+    });
+
+  server.on("/api/ac/manual", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, (const char*)data);
+      if (err) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Neplatny JSON\"}");
+        return;
+      }
+
+      const char* action = doc["action"];
+      if (!action) {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Chyba action\"}");
+        return;
+      }
+
+      bool sent = false;
+      String a = String(action);
+      if (a.equalsIgnoreCase("on")) {
+        sent = sendAcIrCommand(climate.irCodeOn, "MANUAL ON");
+        if (sent) climate.acPowerOn = true;
+      } else if (a.equalsIgnoreCase("off")) {
+        sent = sendAcIrCommand(climate.irCodeOff, "MANUAL OFF");
+        if (sent) climate.acPowerOn = false;
+      } else if (a.equalsIgnoreCase("cool")) {
+        sent = sendAcIrCommand(climate.irCodeCool, "MANUAL COOL");
+      }
+
+      if (sent) {
+        request->send(200, "application/json", "{\"success\":true}");
+      } else {
+        request->send(200, "application/json", "{\"success\":false,\"message\":\"Prikaz neodoslany\"}");
+      }
+    });
   
   server.begin();
   Serial.println("Web server spusteny");
@@ -737,6 +1154,7 @@ void loop() {
 
   // Pridáme výpis, koľko zariadení celkovo našiel skener (pred našim filtrom)
   Serial.printf("Skenovanie dokončené, %d zariadení\n", r->getCount());
+  runAutoClimateControl();
   printDatabase();
   BLEDevice::getScan()->clearResults();
   delay(1000);
