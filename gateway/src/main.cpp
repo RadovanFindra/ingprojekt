@@ -14,6 +14,13 @@
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
+
+#define INFLUXDB_URL "https://influx.findra.net"
+#define INFLUXDB_TOKEN "x9nLIxWvWPbmRB_zJTpDtDwqEeJA5-GZHWnUgAyNRNsZtE7M5KZLIVwgKIeFqUnZ-GDycBF0rJuQrDW82-KN6Q=="
+#define INFLUXDB_ORG "ING"
+#define INFLUXDB_BUCKET "Temp"
 
 // BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
 #define DEBUG_PRINT_KEYS 1
@@ -26,6 +33,9 @@
 #define MAX_HUMIDITY 100.0
 
 #define CUSTOM_MANUFACTURER_ID 0x1234
+
+InfluxDBClient client(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
+Point sensorPoint("senzor_prostredia");
 
 // Dátová štruktúra,
 struct SensorData {
@@ -211,13 +221,41 @@ void unregisterSensor(uint64_t chipId) {
 // Funkcia, ktorá uloží (alebo aktualizuje) údaje o senzore
 void updateSensorData(uint32_t id, float temp, float hum) {
   if (sensorDatabase.count(id) == 0)
-    Serial.printf("\n[NOVÝ SENZOR] ID: 0x%08X\n", id);
+    Serial.printf("\n[NOVY SENZOR] ID: 0x%08X\n", id);
 
   SensorRecord r;
   r.temperature = temp;
   r.humidity = hum;
   r.lastSeen = millis();
   sensorDatabase[id] = r;
+
+  // ===== INFLUXDB ZÁPIS =====
+  sensorPoint.clearFields();
+  sensorPoint.clearTags();
+  
+  // Pridáme tagy (podla coho budes vediet vo web rozhrani filtrovat senzory)
+  String sensorIdStr = formatSensorIdHex(id);
+  sensorPoint.addTag("sensor_id", sensorIdStr);
+
+  // Ak je senzor registrovany, pridame aj jeho 'Name'
+  for (const auto &pair : registeredSensors) {
+    if (pair.second.sensorId.equalsIgnoreCase(sensorIdStr)) {
+      sensorPoint.addTag("sensor_name", pair.second.name);
+      break;
+    }
+  }
+  
+  // Pridáme hodnoty
+  sensorPoint.addField("temperature", temp);
+  sensorPoint.addField("humidity", hum);
+  
+  // Odošleme dáta do InfluxDB
+  if (!client.writePoint(sensorPoint)) {
+    Serial.print("InfluxDB zapis zlyhal: ");
+    Serial.println(client.getLastErrorMessage());
+  } else {
+    Serial.printf("Data odoslane do InfluxDB pre senzor %s.\n", sensorIdStr.c_str());
+  }
 }
 
 // Callback trieda – volá sa vždy, keď sa zachytí BLE reklama
@@ -717,6 +755,15 @@ void setup() {
     request->send(200, "application/json", response);
   });
   
+  client.setInsecure(); // Ignoruje overovanie SSL
+  if (client.validateConnection()) {
+    Serial.print("Pripojene k InfluxDB: ");
+    Serial.println(client.getServerUrl());
+  } else {
+    Serial.print("Zlyhalo pripojenie k InfluxDB: ");
+    Serial.println(client.getLastErrorMessage());
+  }
+
   server.begin();
   Serial.println("Web server spusteny");
   
