@@ -16,11 +16,43 @@
 #include <ArduinoJson.h>
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
+#include "env_config.h"
 
-#define INFLUXDB_URL "https://influx.findra.net"
-#define INFLUXDB_TOKEN "x9nLIxWvWPbmRB_zJTpDtDwqEeJA5-GZHWnUgAyNRNsZtE7M5KZLIVwgKIeFqUnZ-GDycBF0rJuQrDW82-KN6Q=="
-#define INFLUXDB_ORG "ING"
-#define INFLUXDB_BUCKET "Temp"
+#ifndef APP_ENV
+#define APP_ENV "development"
+#endif
+
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD ""
+#endif
+
+#ifndef INFLUXDB_URL
+#define INFLUXDB_URL ""
+#endif
+
+#ifndef INFLUXDB_TOKEN
+#define INFLUXDB_TOKEN ""
+#endif
+
+#ifndef INFLUXDB_ORG
+#define INFLUXDB_ORG ""
+#endif
+
+#ifndef INFLUXDB_BUCKET
+#define INFLUXDB_BUCKET ""
+#endif
+
+#ifndef MQTT_PORT
+#define MQTT_PORT 1883
+#endif
+
+#ifndef DEVICE_ID
+#define DEVICE_ID "esp32-c6-gateway"
+#endif
 
 // BEZPEČNOSTNÉ UPOZORNENIE: Nastavte na 0 pre produkčné nasadenie!
 #define DEBUG_PRINT_KEYS 1
@@ -68,8 +100,8 @@ std::map<uint64_t, RegisteredSensor> registeredSensors;
 AsyncWebServer server(80);
 
 // WiFi údaje
-const char* ssid = "Gateway_Config";
-const char* password = "GatewaySecure2024!";  // Zmeňte toto heslo po prvom nasadení!
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;  // Hodnoty sa berú z .env pri builde.
 
 String formatSensorIdHex(uint32_t sensorId) {
   char sensorIdStr[9];
@@ -364,12 +396,32 @@ void setup() {
   // Načítanie registrovaných senzorov
   loadSensorsFromFile();
   
-  // Nastavenie WiFi AP
-  WiFi.softAP(ssid, password);
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP adresa: ");
-  Serial.println(IP);
+  // // Nastavenie WiFi AP
+  // WiFi.softAP(ssid, password);
+  // IPAddress IP = WiFi.softAPIP();
+  // Serial.print("AP IP adresa: ");
+  // Serial.println(IP);
   
+
+  
+  Serial.println();
+  Serial.println("******************************************************");
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+
   // Web server routes
   
   // Hlavná stránka s GUI
